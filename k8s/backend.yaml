@@ -1,0 +1,149 @@
+# =============================================================================
+# Aplicação B — api-backend
+#   ConfigMap  : código-fonte do servidor (mesmo de apps/backend-node/server.js)
+#   Deployment : 3 réplicas usando a imagem pública node:20-alpine
+#   Service    : api-service (ClusterIP) na porta 8080 -> DNS interno
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-backend-code
+  labels:
+    app: api-backend
+data:
+  server.js: |
+    const http = require('http');
+    const os = require('os');
+
+    const PORT = Number(process.env.PORT) || 8080;
+    const HOSTNAME = process.env.POD_NAME || os.hostname();
+    const STARTED_AT = new Date().toISOString();
+    let requestCount = 0;
+
+    function getPodIP() {
+      if (process.env.POD_IP) return process.env.POD_IP;
+      for (const ifaces of Object.values(os.networkInterfaces())) {
+        for (const iface of ifaces || []) {
+          if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+        }
+      }
+      return '127.0.0.1';
+    }
+    const POD_IP = getPodIP();
+
+    const server = http.createServer((req, res) => {
+      if (req.url === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        return res.end('ok\n');
+      }
+
+      requestCount++;
+      const body = {
+        message: 'Olá do api-backend! 👋',
+        hostname: HOSTNAME,
+        ip: POD_IP,
+        uri: req.url,
+        method: req.method,
+        time: new Date().toISOString(),
+        startedAt: STARTED_AT,
+        requestsServed: requestCount,
+        calledBy: req.headers['x-frontend-pod'] || req.socket.remoteAddress,
+      };
+
+      console.log(`[${body.time}] ${req.method} ${req.url} <- ${body.calledBy} (#${requestCount})`);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify(body, null, 2) + '\n');
+    });
+
+    server.listen(PORT, () => {
+      console.log(`api-backend ouvindo na porta ${PORT} | pod=${HOSTNAME} ip=${POD_IP}`);
+    });
+
+    function shutdown(signal) {
+      console.log(`${signal} recebido, encerrando...`);
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 3000).unref();
+    }
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-backend
+  labels:
+    app: api-backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-backend
+  template:
+    metadata:
+      labels:
+        app: api-backend
+    spec:
+      containers:
+        - name: api-backend
+          image: node:20-alpine
+          command: ["node", "/app/server.js"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            # Downward API: o Kubernetes injeta nome e IP do Pod como variáveis
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          volumeMounts:
+            - name: code
+              mountPath: /app
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: code
+          configMap:
+            name: api-backend-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service
+  labels:
+    app: api-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: api-backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

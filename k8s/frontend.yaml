@@ -1,0 +1,538 @@
+# =============================================================================
+# Aplicação A — web-frontend
+#   ConfigMap  : nginx.conf (proxy /api/ -> http://api-service:8080) + index.html
+#   Deployment : 1 réplica nginx:1.27-alpine
+#   Service    : frontend-svc (ClusterIP) na porta 80
+#
+# Fluxo: Navegador -> port-forward -> frontend-svc -> Pod nginx
+#        nginx resolve "api-service" via CoreDNS e faz GET http://api-service:8080
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-frontend-config
+  labels:
+    app: web-frontend
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name _;
+
+      # Painel visual (HTML estático)
+      location / {
+        root  /usr/share/nginx/html;
+        index index.html;
+        add_header Cache-Control "no-store" always;
+      }
+
+      # Proxy interno: o nome "api-service" é resolvido pelo CoreDNS do cluster
+      location /api/ {
+        proxy_pass http://api-service:8080/;
+        proxy_set_header X-Frontend-Pod $hostname;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 5s;
+        add_header X-Frontend-Pod  $hostname      always;
+        add_header X-Upstream-Addr $upstream_addr always;
+        add_header Cache-Control   "no-store"     always;
+      }
+
+      location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+      }
+    }
+
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Kubernetes Live Lab — Oficina de Orquestração</title>
+      <meta name="description" content="Painel em tempo real que mostra o balanceamento de carga do Service api-service entre os Pods do backend no Kubernetes." />
+      <link rel="preconnect" href="https://fonts.googleapis.com" />
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+      <style>
+        :root {
+          --bg: #060912;
+          --panel: rgba(255, 255, 255, 0.035);
+          --panel-strong: rgba(255, 255, 255, 0.06);
+          --border: rgba(255, 255, 255, 0.08);
+          --text: #e7ecf5;
+          --muted: #8a96ab;
+          --accent: #7c5cff;
+          --accent-2: #22d3ee;
+          --ok: #34d399;
+          --err: #fb7185;
+          --warn: #fbbf24;
+          --radius: 18px;
+          --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+          font-family: 'Inter', system-ui, -apple-system, sans-serif;
+          color: var(--text);
+          background:
+            radial-gradient(900px 500px at 10% -10%, rgba(124, 92, 255, 0.22), transparent 60%),
+            radial-gradient(800px 500px at 110% 10%, rgba(34, 211, 238, 0.16), transparent 60%),
+            radial-gradient(700px 400px at 50% 120%, rgba(52, 211, 153, 0.10), transparent 60%),
+            var(--bg);
+          min-height: 100vh;
+          padding: 32px 20px 60px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; display: grid; gap: 22px; }
+        .glass {
+          background: var(--panel);
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          backdrop-filter: blur(14px);
+          -webkit-backdrop-filter: blur(14px);
+          box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+        }
+
+        /* ---------- Header ---------- */
+        header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 18px; }
+        .brand { display: flex; align-items: center; gap: 14px; }
+        .logo {
+          width: 52px; height: 52px; border-radius: 14px; display: grid; place-items: center;
+          background: linear-gradient(135deg, var(--accent), var(--accent-2));
+          box-shadow: 0 8px 30px rgba(124, 92, 255, 0.45);
+          font-size: 26px; animation: spin 18s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        h1 {
+          font-size: clamp(22px, 3vw, 30px); font-weight: 800; letter-spacing: -0.02em;
+          background: linear-gradient(90deg, #fff, #c9c2ff 50%, #8ef0ff);
+          -webkit-background-clip: text; background-clip: text; color: transparent;
+        }
+        .subtitle { color: var(--muted); font-size: 14px; margin-top: 2px; }
+        .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+        .chip {
+          display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px;
+          border-radius: 999px; font-size: 12.5px; color: var(--muted);
+          background: var(--panel-strong); border: 1px solid var(--border);
+        }
+        .chip b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+        .dot.live { background: var(--ok); box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); animation: pulse 1.6s infinite; }
+        .dot.down { background: var(--err); }
+        @keyframes pulse {
+          0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.6); }
+          70% { box-shadow: 0 0 0 10px rgba(52, 211, 153, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+        }
+
+        /* ---------- Flow ---------- */
+        .flow { padding: 22px; display: grid; grid-template-columns: 1fr 60px 1fr 60px 1fr 60px 1fr; align-items: center; gap: 6px; }
+        .node {
+          text-align: center; padding: 16px 10px; border-radius: 14px;
+          background: var(--panel-strong); border: 1px solid var(--border);
+          transition: border-color .3s, box-shadow .3s, transform .3s;
+        }
+        .node .ico { font-size: 24px; }
+        .node .label { font-weight: 700; font-size: 14px; margin-top: 6px; }
+        .node small { display: block; margin-top: 4px; color: var(--muted); font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+        .node.hit { border-color: var(--hit, var(--accent-2)); box-shadow: 0 0 24px -4px var(--hit, var(--accent-2)); transform: translateY(-2px); }
+        .wire { position: relative; height: 2px; background: linear-gradient(90deg, rgba(255,255,255,.08), rgba(255,255,255,.18), rgba(255,255,255,.08)); border-radius: 2px; }
+        .wire .packet {
+          position: absolute; top: 50%; left: 0; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%;
+          background: var(--accent-2); box-shadow: 0 0 12px var(--accent-2); opacity: 0;
+        }
+        .wire.go .packet { animation: travel .35s ease-in-out forwards; animation-delay: var(--d, 0s); }
+        @keyframes travel { 0% { left: 0; opacity: 1; } 100% { left: calc(100% - 10px); opacity: 1; } }
+
+        /* ---------- Controls + Stats ---------- */
+        .toolbar { padding: 20px 22px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+        .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+        button, select {
+          font: inherit; font-size: 14px; font-weight: 600; color: var(--text); cursor: pointer;
+          border-radius: 12px; border: 1px solid var(--border); background: var(--panel-strong);
+          padding: 12px 18px; transition: transform .15s, box-shadow .2s, background .2s, border-color .2s;
+        }
+        button:hover, select:hover { transform: translateY(-1px); border-color: rgba(255,255,255,.2); }
+        button:active { transform: translateY(1px) scale(.98); }
+        .btn-primary {
+          border: none; background: linear-gradient(135deg, var(--accent), #5b8cff 60%, var(--accent-2));
+          box-shadow: 0 8px 26px rgba(124, 92, 255, 0.45);
+        }
+        .btn-primary:hover { box-shadow: 0 10px 34px rgba(124, 92, 255, 0.65); }
+        .btn-auto.on {
+          background: linear-gradient(135deg, rgba(52,211,153,.25), rgba(34,211,238,.25));
+          border-color: rgba(52, 211, 153, .6); box-shadow: 0 0 22px -6px var(--ok);
+        }
+        select { padding: 12px 14px; }
+        select option { background: #111827; }
+        .stats { display: grid; grid-template-columns: repeat(5, minmax(100px, 1fr)); gap: 12px; }
+        .stat { padding: 10px 14px; border-radius: 12px; background: var(--panel-strong); border: 1px solid var(--border); min-width: 100px; }
+        .stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+        .stat .v { font-size: 22px; font-weight: 800; margin-top: 2px; font-variant-numeric: tabular-nums; }
+        .v.ok { color: var(--ok); } .v.err { color: var(--err); }
+
+        /* ---------- Replicas ---------- */
+        .section { padding: 22px; }
+        .section h2 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+        .section h2 .hint { font-size: 12.5px; font-weight: 500; color: var(--muted); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+        .empty { color: var(--muted); font-size: 14px; padding: 26px; text-align: center; border: 1px dashed var(--border); border-radius: 14px; }
+        .pod {
+          --c: #7c5cff; position: relative; overflow: hidden; padding: 16px; border-radius: 14px;
+          background: linear-gradient(160deg, color-mix(in srgb, var(--c) 14%, transparent), rgba(255,255,255,.02));
+          border: 1px solid color-mix(in srgb, var(--c) 35%, transparent);
+          transition: transform .25s, box-shadow .25s, opacity .4s, filter .4s;
+          animation: popIn .45s cubic-bezier(.2,.9,.3,1.3);
+        }
+        @keyframes popIn { from { opacity: 0; transform: scale(.9) translateY(8px); } to { opacity: 1; transform: none; } }
+        .pod.flash { animation: flash .6s ease-out; }
+        @keyframes flash {
+          0% { box-shadow: 0 0 0 0 var(--c); transform: scale(1.03); }
+          100% { box-shadow: 0 0 0 14px transparent; transform: scale(1); }
+        }
+        .pod.inactive { opacity: .45; filter: grayscale(.8); }
+        .pod-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .pod-name { font-family: var(--mono); font-weight: 600; font-size: 13px; word-break: break-all; }
+        .badge { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 4px 8px; border-radius: 999px; white-space: nowrap; }
+        .badge.on { color: var(--ok); background: rgba(52,211,153,.12); border: 1px solid rgba(52,211,153,.35); }
+        .badge.off { color: var(--err); background: rgba(251,113,133,.12); border: 1px solid rgba(251,113,133,.35); }
+        .pod-meta { margin-top: 10px; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12.5px; color: var(--muted); }
+        .pod-meta span:nth-child(even) { color: var(--text); font-family: var(--mono); text-align: right; }
+        .bar { margin-top: 12px; height: 8px; border-radius: 99px; background: rgba(255,255,255,.06); overflow: hidden; }
+        .bar > i { display: block; height: 100%; width: 0; border-radius: 99px; background: linear-gradient(90deg, var(--c), color-mix(in srgb, var(--c) 50%, white)); transition: width .4s ease; }
+        .pod-count { margin-top: 8px; display: flex; justify-content: space-between; font-size: 12.5px; color: var(--muted); }
+        .pod-count b { color: var(--text); font-size: 18px; font-variant-numeric: tabular-nums; }
+
+        /* ---------- Log ---------- */
+        .log { max-height: 340px; overflow: auto; border-radius: 12px; border: 1px solid var(--border); }
+        table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+        th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+        th { position: sticky; top: 0; background: #0c1220; color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .06em; }
+        td { font-family: var(--mono); }
+        tr.new { animation: rowIn .5s ease-out; }
+        @keyframes rowIn { from { background: rgba(124,92,255,.18); } to { background: transparent; } }
+        .tag { display: inline-flex; align-items: center; gap: 6px; }
+        .tag i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+        .st-ok { color: var(--ok); } .st-err { color: var(--err); }
+
+        footer { text-align: center; color: var(--muted); font-size: 12.5px; }
+        footer code { font-family: var(--mono); color: var(--text); background: var(--panel-strong); padding: 2px 6px; border-radius: 6px; }
+
+        @media (max-width: 860px) {
+          .flow { grid-template-columns: 1fr; }
+          .wire { height: 26px; width: 2px; margin: 0 auto; }
+          .wire .packet { display: none; }
+          .stats { grid-template-columns: repeat(2, 1fr); width: 100%; }
+        }
+      </style>
+    </head>
+    <body>
+      <main class="container">
+        <header>
+          <div class="brand">
+            <div class="logo" aria-hidden="true">☸️</div>
+            <div>
+              <h1>Kubernetes Live Lab</h1>
+              <p class="subtitle">Frontend → <code>api-service:8080</code> (CoreDNS) → Pods do <code>api-backend</code></p>
+            </div>
+          </div>
+          <div class="chips">
+            <span class="chip"><span class="dot" id="status-dot"></span>Status: <b id="status-text">aguardando</b></span>
+            <span class="chip">Frontend Pod: <b id="chip-fe">—</b></span>
+            <span class="chip">api-service → <b id="chip-svc">—</b></span>
+          </div>
+        </header>
+
+        <section class="glass flow" aria-label="Fluxo da requisição">
+          <div class="node" id="node-browser"><div class="ico">🧑‍💻</div><div class="label">Navegador</div><small>localhost:8080</small></div>
+          <div class="wire"><span class="packet"></span></div>
+          <div class="node" id="node-fe"><div class="ico">🌐</div><div class="label">web-frontend</div><small id="flow-fe">nginx proxy</small></div>
+          <div class="wire"><span class="packet"></span></div>
+          <div class="node" id="node-svc"><div class="ico">🧭</div><div class="label">Service api-service</div><small id="flow-svc">ClusterIP:8080</small></div>
+          <div class="wire"><span class="packet"></span></div>
+          <div class="node" id="node-pod"><div class="ico">📦</div><div class="label">Pod Backend</div><small id="flow-pod">—</small></div>
+        </section>
+
+        <section class="glass toolbar" aria-label="Controles">
+          <div class="actions">
+            <button id="btn-fire" class="btn-primary">⚡ Disparar Requisição HTTP</button>
+            <button id="btn-auto" class="btn-auto">🔄 Auto-Disparo</button>
+            <select id="sel-interval" aria-label="Intervalo do auto-disparo">
+              <option value="1000">a cada 1s</option>
+              <option value="500" selected>a cada 500ms</option>
+              <option value="250">a cada 250ms</option>
+            </select>
+            <button id="btn-reset">🧹 Zerar</button>
+          </div>
+          <div class="stats">
+            <div class="stat"><div class="k">Requisições</div><div class="v" id="st-total">0</div></div>
+            <div class="stat"><div class="k">Sucesso</div><div class="v ok" id="st-ok">0</div></div>
+            <div class="stat"><div class="k">Erros</div><div class="v err" id="st-err">0</div></div>
+            <div class="stat"><div class="k">Latência média</div><div class="v" id="st-lat">—</div></div>
+            <div class="stat"><div class="k">Réplicas ativas</div><div class="v" id="st-pods">0</div></div>
+          </div>
+        </section>
+
+        <section class="glass section" aria-labelledby="h-replicas">
+          <h2 id="h-replicas">🏆 Placar de Réplicas <span class="hint">cada card é um Pod que respondeu via api-service</span></h2>
+          <div class="grid" id="pods">
+            <div class="empty" id="pods-empty">Nenhuma requisição ainda. Clique em <b>⚡ Disparar Requisição HTTP</b> para começar.</div>
+          </div>
+        </section>
+
+        <section class="glass section" aria-labelledby="h-log">
+          <h2 id="h-log">📜 Histórico de Requisições <span class="hint">últimas 50</span></h2>
+          <div class="log">
+            <table>
+              <thead><tr><th>#</th><th>Horário</th><th>Status</th><th>Pod (hostname)</th><th>IP do Pod</th><th>URI</th><th>Latência</th></tr></thead>
+              <tbody id="log-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <footer>Experimente: <code>kubectl delete pod &lt;pod&gt;</code> · <code>kubectl scale deployment api-backend --replicas=6</code></footer>
+      </main>
+
+      <script>
+        const $ = (id) => document.getElementById(id);
+        const INACTIVE_AFTER_MS = 6000;
+        const MAX_LOG = 50;
+
+        const state = { seq: 0, total: 0, ok: 0, err: 0, latSum: 0, lastReqAt: 0, pods: new Map(), timer: null };
+
+        function colorFor(name) {
+          let h = 0;
+          for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+          return `hsl(${h % 360}, 85%, 62%)`;
+        }
+
+        function ago(ts) {
+          const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+          return s < 1 ? 'agora' : `há ${s}s`;
+        }
+
+        function animateFlow(color) {
+          document.querySelectorAll('.wire').forEach((w, i) => {
+            w.classList.remove('go');
+            void w.offsetWidth;
+            w.style.setProperty('--d', `${i * 0.12}s`);
+            w.querySelector('.packet').style.background = color;
+            w.querySelector('.packet').style.boxShadow = `0 0 12px ${color}`;
+            w.classList.add('go');
+          });
+          ['node-fe', 'node-svc', 'node-pod'].forEach((id, i) => {
+            const n = $(id);
+            setTimeout(() => {
+              n.style.setProperty('--hit', color);
+              n.classList.add('hit');
+              setTimeout(() => n.classList.remove('hit'), 380);
+            }, 120 * (i + 1));
+          });
+        }
+
+        function setStatus(ok, text) {
+          $('status-dot').className = 'dot ' + (ok ? 'live' : 'down');
+          $('status-text').textContent = text;
+        }
+
+        function upsertPod(data) {
+          const name = data.hostname;
+          let p = state.pods.get(name);
+          if (!p) {
+            const color = colorFor(name);
+            const el = document.createElement('article');
+            el.className = 'pod';
+            el.style.setProperty('--c', color);
+            el.innerHTML = `
+              <div class="pod-head"><div class="pod-name"></div><span class="badge on">ativo</span></div>
+              <div class="pod-meta">
+                <span>IP interno</span><span class="m-ip"></span>
+                <span>Iniciado</span><span class="m-start"></span>
+                <span>Última resposta</span><span class="m-seen"></span>
+              </div>
+              <div class="bar"><i></i></div>
+              <div class="pod-count"><span class="m-pct">0%</span><span><b class="m-count">0</b> req</span></div>`;
+            el.querySelector('.pod-name').textContent = name;
+            $('pods-empty')?.remove();
+            $('pods').appendChild(el);
+            p = { name, color, el, count: 0, lastSeen: 0 };
+            state.pods.set(name, p);
+          }
+          p.count++;
+          p.lastSeen = Date.now();
+          p.ip = data.ip;
+          p.startedAt = data.startedAt;
+          p.el.classList.remove('flash');
+          void p.el.offsetWidth;
+          p.el.classList.add('flash');
+          return p;
+        }
+
+        function render() {
+          $('st-total').textContent = state.total;
+          $('st-ok').textContent = state.ok;
+          $('st-err').textContent = state.err;
+          $('st-lat').textContent = state.ok ? `${Math.round(state.latSum / state.ok)}ms` : '—';
+
+          const now = Date.now();
+          let active = 0;
+          for (const p of state.pods.values()) {
+            const inactive = state.lastReqAt - p.lastSeen > INACTIVE_AFTER_MS && now - state.lastReqAt < 60000;
+            if (!inactive) active++;
+            p.el.classList.toggle('inactive', inactive);
+            const badge = p.el.querySelector('.badge');
+            badge.className = 'badge ' + (inactive ? 'off' : 'on');
+            badge.textContent = inactive ? 'inativo' : 'ativo';
+            p.el.querySelector('.m-ip').textContent = p.ip;
+            p.el.querySelector('.m-start').textContent = new Date(p.startedAt).toLocaleTimeString('pt-BR');
+            p.el.querySelector('.m-seen').textContent = ago(p.lastSeen);
+            const pct = state.ok ? (p.count / state.ok) * 100 : 0;
+            p.el.querySelector('.bar > i').style.width = pct.toFixed(1) + '%';
+            p.el.querySelector('.m-pct').textContent = pct.toFixed(1) + '%';
+            p.el.querySelector('.m-count').textContent = p.count;
+          }
+          $('st-pods').textContent = active;
+        }
+
+        function addLog(row) {
+          const tr = document.createElement('tr');
+          tr.className = 'new';
+          const color = row.color || 'var(--err)';
+          tr.innerHTML = `
+            <td>${row.n}</td>
+            <td>${new Date().toLocaleTimeString('pt-BR')}</td>
+            <td class="${row.ok ? 'st-ok' : 'st-err'}">${row.status}</td>
+            <td><span class="tag" style="--c:${color}"><i></i><span class="t-pod"></span></span></td>
+            <td class="t-ip"></td>
+            <td class="t-uri"></td>
+            <td>${row.lat}ms</td>`;
+          tr.querySelector('.t-pod').textContent = row.pod || '—';
+          tr.querySelector('.t-ip').textContent = row.ip || '—';
+          tr.querySelector('.t-uri').textContent = row.uri || '—';
+          const body = $('log-body');
+          body.prepend(tr);
+          while (body.children.length > MAX_LOG) body.lastChild.remove();
+        }
+
+        async function fire() {
+          const n = ++state.seq;
+          const t0 = performance.now();
+          state.total++;
+          state.lastReqAt = Date.now();
+          try {
+            const res = await fetch(`/api/pedido/${n}`, { cache: 'no-store' });
+            const lat = Math.round(performance.now() - t0);
+            const fe = res.headers.get('X-Frontend-Pod');
+            const up = res.headers.get('X-Upstream-Addr');
+            if (fe) { $('chip-fe').textContent = fe; $('flow-fe').textContent = fe; }
+            if (up) { $('chip-svc').textContent = up; $('flow-svc').textContent = up; }
+            if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { lat });
+            const data = await res.json();
+            state.ok++;
+            state.latSum += lat;
+            const p = upsertPod(data);
+            $('flow-pod').textContent = `${data.hostname} (${data.ip})`;
+            animateFlow(p.color);
+            setStatus(true, 'online');
+            addLog({ n, ok: true, status: res.status, pod: data.hostname, ip: data.ip, uri: data.uri, lat, color: p.color });
+          } catch (e) {
+            state.err++;
+            setStatus(false, e.message || 'erro');
+            addLog({ n, ok: false, status: e.message || 'falha', lat: e.lat ?? Math.round(performance.now() - t0) });
+          }
+          render();
+        }
+
+        function toggleAuto() {
+          const btn = $('btn-auto');
+          if (state.timer) {
+            clearInterval(state.timer);
+            state.timer = null;
+            btn.classList.remove('on');
+            btn.textContent = '🔄 Auto-Disparo';
+          } else {
+            state.timer = setInterval(fire, Number($('sel-interval').value));
+            btn.classList.add('on');
+            btn.textContent = '⏸️ Parar Auto-Disparo';
+            fire();
+          }
+        }
+
+        $('btn-fire').addEventListener('click', fire);
+        $('btn-auto').addEventListener('click', toggleAuto);
+        $('sel-interval').addEventListener('change', () => { if (state.timer) { toggleAuto(); toggleAuto(); } });
+        $('btn-reset').addEventListener('click', () => {
+          Object.assign(state, { seq: 0, total: 0, ok: 0, err: 0, latSum: 0, lastReqAt: 0 });
+          state.pods.forEach((p) => p.el.remove());
+          state.pods.clear();
+          $('log-body').innerHTML = '';
+          $('pods').innerHTML = '<div class="empty" id="pods-empty">Placar zerado. Dispare novas requisições!</div>';
+          render();
+        });
+        setInterval(render, 1000);
+      </script>
+    </body>
+    </html>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-frontend
+  labels:
+    app: web-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-frontend
+  template:
+    metadata:
+      labels:
+        app: web-frontend
+    spec:
+      containers:
+        - name: web-frontend
+          image: nginx:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+            - name: config
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 20m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      volumes:
+        - name: config
+          configMap:
+            name: web-frontend-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-svc
+  labels:
+    app: web-frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: web-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,19 @@
+# =============================================================================
+# (Opcional) Cluster kind com 1 control-plane + 2 workers
+# -----------------------------------------------------------------------------
+# Útil para ver os Pods do backend distribuídos em nós diferentes
+# (coluna NODE em "kubectl get pods -o wide").
+#
+# Uso:
+#   kind create cluster --config k8s/kind-config.yaml
+#
+# Sem este arquivo, "kind create cluster --name oficina" cria um cluster
+# de nó único — e a oficina funciona exatamente igual.
+# =============================================================================
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: oficina
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
