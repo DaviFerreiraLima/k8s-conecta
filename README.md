@@ -1,4 +1,4 @@
-# 🚀 Oficina Prática: Orquestração de Contêineres com Kubernetes
+# Oficina Prática: Orquestração de Contêineres com Kubernetes
 
 Bem-vindo(a) ao repositório oficial da nossa oficina! Neste laboratório guiado de **80 minutos**, vamos criar um cluster Kubernetes local usando o **kind** e provisionar duas aplicações que conversam internamente via **HTTP** e **DNS** utilizando `Pods`, `Deployments` e `Services`.
 
